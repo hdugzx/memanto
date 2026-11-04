@@ -36,16 +36,31 @@ KV_CREDENTIAL_UNQUOTED = re.compile(
     r"""(?i)\b((?:api[_-]?key|secret[_-]?key|secret[_-]?access[_-]?key|aws[_-]?secret[_-]?access[_-]?key|client[_-]?secret|password|passwd|auth[_-]?token)\s*[:=]\s*)[^\s,;'"}\]]{1,}"""
 )
 
-# Neutralize any case/whitespace variant of the closing tag (MEM-1852)
+# Neutralize any case/whitespace variant of the conversation_content tags (MEM-1852)
+# Both opening and closing tags must be defanged to prevent prompt injection:
+# - Closing tag injection could break out of the wrapper
+# - Opening tag injection could confuse the LLM into treating injected content
+#   as a new conversation boundary, enabling indirect prompt injection
 _CLOSING_TAG_PATTERN = re.compile(
     r"<\s*/\s*conversation_content(?![A-Za-z0-9_-])",
     re.IGNORECASE,
 )
+_OPENING_TAG_PATTERN = re.compile(
+    r"<\s*conversation_content(?![A-Za-z0-9_-])",
+    re.IGNORECASE,
+)
 
 
-def _defang_closing_tag(text: str) -> str:
-    """Neutralize closing tags so untrusted text cannot break out of <conversation_content>."""
-    return _CLOSING_TAG_PATTERN.sub("<\\\\/conversation_content", text)
+def _defang_conversation_tags(text: str) -> str:
+    """Neutralize conversation_content tags so untrusted text cannot manipulate boundaries.
+
+    Both opening and closing tags are escaped to prevent:
+    1. Breaking out of the <conversation_content> wrapper (closing tag injection)
+    2. Injecting fake conversation boundaries that confuse the LLM (opening tag injection)
+    """
+    text = _CLOSING_TAG_PATTERN.sub(r"<\/conversation_content", text)
+    text = _OPENING_TAG_PATTERN.sub(r"<\\conversation_content", text)
+    return text
 
 
 def redact_sensitive_data(text: str) -> str:
@@ -174,9 +189,9 @@ class ConversationMemoryExtractionService:
         lines: list[str] = []
         total = 0
         for i, message in enumerate(messages):
-            # Escape the closing tag across case/whitespace variants to prevent breakouts (MEM-1852)
-            safe_role = _defang_closing_tag(message["role"])
-            safe_content = _defang_closing_tag(message["content"])
+            # Escape conversation_content tags to prevent prompt injection (MEM-1852)
+            safe_role = _defang_conversation_tags(message["role"])
+            safe_content = _defang_conversation_tags(message["content"])
             line = f"{safe_role.strip()}: {safe_content.strip()}"
             # Account for the newline separator that join() adds between
             # accepted messages.  Without this, two lines whose lengths sum
